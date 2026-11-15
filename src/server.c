@@ -3,21 +3,20 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 int set_nonblocking(int sock) {
     int opts = fcntl(sock, F_GETFL, 0);
-    if (opts == -1) {
-        return -1;
-    }
+    if (opts == -1) return -1;
     return fcntl(sock, F_SETFL, opts | O_NONBLOCK);
 }
 
 int start_server(void) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
-        perror("Error al crear el socket");
+        perror("socket");
         return -1;
     }
 
@@ -34,15 +33,13 @@ int start_server(void) {
     address.sin_port = htons(PORT);
 
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) == -1) {
-        perror("Error en bind");
+        perror("bind");
         goto error;
     }
-
     if (listen(server_fd, SOMAXCONN) == -1) {
-        perror("Error en listen");
+        perror("listen");
         goto error;
     }
-
     if (set_nonblocking(server_fd) == -1) {
         perror("fcntl (servidor)");
         goto error;
@@ -56,4 +53,8 @@ error:
 
 ssize_t receive_client_data(int client_fd, char *buffer, size_t capacity) {
     return recv(client_fd, buffer, capacity, 0);
+}
+
+ssize_t send_data(int fd, const char *buf, size_t len) {
+    return send(fd, buf, len, MSG_NOSIGNAL);
 }
