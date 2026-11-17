@@ -1,7 +1,20 @@
 #ifndef FILES_H
 #define FILES_H
 
-void serve_file(int client_fd, const char *uri, int keep_alive);
-void send_error_response(int client_fd, int status_code, const char *message, int keep_alive);
+#include <stddef.h>
+#include <sys/types.h>
+
+typedef struct {
+    int fd;
+    off_t size;
+    const char *mime_type;
+} FileResource;
+
+int open_public_file(const char *uri, FileResource *resource);
+
+int build_file_header(const FileResource *resource, char *buffer,
+                      size_t capacity, size_t *length);
+int build_error_response(int status_code, char *buffer,
+                         size_t capacity, size_t *length);
 
 #endif

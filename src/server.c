@@ -55,6 +55,7 @@ ssize_t receive_client_data(int client_fd, char *buffer, size_t capacity) {
     return recv(client_fd, buffer, capacity, 0);
 }
 
+/* Envía solo lo que el socket pueda aceptar ahora. EPOLLOUT gestiona el resto. */
 ssize_t send_data(int fd, const char *buf, size_t len) {
     return send(fd, buf, len, MSG_NOSIGNAL);
 }

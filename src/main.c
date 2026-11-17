@@ -1,5 +1,7 @@
 #include "server.h"
 #include "http.h"
+#include "files.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,60 +13,100 @@
 
 typedef struct {
     int fd;
-    char buffer[BUFFER_SIZE];
-    size_t bytes_received;
+    char request[BUFFER_SIZE];
+    size_t received;
+
     char response[BUFFER_SIZE];
     size_t response_length;
     size_t response_sent;
+
+    FileResource file;
+    char file_buffer[BUFFER_SIZE];
+    size_t chunk_length;
+    size_t chunk_sent;
 } Client;
 
 static void close_client(int epoll_fd, Client *client) {
     if (client == NULL) return;
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
+    if (client->file.fd >= 0) close(client->file.fd);
     close(client->fd);
     printf("Cliente %d desconectado\n", client->fd);
+    fflush(stdout);
     free(client);
 }
 
-static int prepare_response(Client *client, int status) {
-    const char *body;
-    const char *status_line;
-    const char *type;
-    const char *extra = "";
+static int enable_write(int epoll_fd, Client *client) {
+    struct epoll_event event = {0};
+    event.events = EPOLLOUT;
+    event.data.ptr = client;
+    return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client->fd, &event);
+}
 
-    switch (status) {
-        case 200:
-            status_line = "HTTP/1.1 200 OK";
-            body = "<html><body><h1>200 OK - MiniHTTPd funcionando</h1></body></html>";
-            type = "text/html";
-            break;
-        case 405:
-            status_line = "HTTP/1.1 405 Method Not Allowed";
-            body = "405 Method Not Allowed\n";
-            type = "text/plain";
-            extra = "Allow: GET\r\n";
-            break;
-        default:
-            status_line = "HTTP/1.1 400 Bad Request";
-            body = "400 Bad Request\n";
-            type = "text/plain";
-            break;
+static int prepare_response(Client *client, int status, const char *uri) {
+    if (status == 200) {
+        status = open_public_file(uri, &client->file);
+    }
+    if (status == 200) {
+        if (build_file_header(&client->file, client->response,
+                              sizeof(client->response),
+                              &client->response_length) == -1) {
+            return -1;
+        }
+    } else {
+        if (build_error_response(status, client->response,
+                                 sizeof(client->response),
+                                 &client->response_length) == -1) {
+            return -1;
+        }
+    }
+    client->response_sent = 0;
+    printf("Estado HTTP: %d\n", status);
+    return 0;
+}
+
+static int write_client(Client *client) {
+    if (client->response_sent < client->response_length) {
+        ssize_t n = send_data(client->fd,
+                              client->response + client->response_sent,
+                              client->response_length - client->response_sent);
+        if (n > 0) {
+            client->response_sent += (size_t)n;
+            return 0;
+        }
+        if (n == -1 && (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK)) return 0;
+        return -1;
     }
 
-    int len = snprintf(client->response, sizeof(client->response),
-        "%s\r\n"
-        "Content-Type: %s; charset=UTF-8\r\n"
-        "Content-Length: %zu\r\n"
-        "%s"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        status_line, type, strlen(body), extra, body);
+    if (client->file.fd == -1) return 1; /* respuesta de error completa */
 
-    if (len < 0 || (size_t)len >= sizeof(client->response)) return -1;
-    client->response_length = (size_t)len;
-    client->response_sent = 0;
-    return 0;
+    if (client->chunk_sent == client->chunk_length) {
+        ssize_t n = read(client->file.fd, client->file_buffer,
+                         sizeof(client->file_buffer));
+        if (n > 0) {
+            client->chunk_length = (size_t)n;
+            client->chunk_sent = 0;
+        } else if (n == 0) {
+            return 1;
+        } else if (errno == EINTR) {
+            return 0;
+        } else {
+            perror("read archivo");
+            return -1;
+        }
+    }
+
+    ssize_t n = send_data(client->fd,
+                          client->file_buffer + client->chunk_sent,
+                          client->chunk_length - client->chunk_sent);
+    if (n > 0) {
+        client->chunk_sent += (size_t)n;
+        return 0;
+    }
+    if (n == -1 && (errno == EINTR || errno == EAGAIN ||
+                    errno == EWOULDBLOCK)) return 0;
+    return -1;
 }
 
 int main(void) {
@@ -78,11 +120,11 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    struct epoll_event ev = {0};
-    ev.events = EPOLLIN;
-    ev.data.ptr = NULL;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) == -1) {
-        perror("epoll_ctl (servidor)");
+    struct epoll_event server_event = {0};
+    server_event.events = EPOLLIN;
+    server_event.data.ptr = NULL;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &server_event) == -1) {
+        perror("epoll_ctl servidor");
         close(epoll_fd);
         close(server_fd);
         return EXIT_FAILURE;
@@ -100,7 +142,7 @@ int main(void) {
             break;
         }
 
-        for (int i = 0; i < nfds; i++) {
+        for (int i = 0; i < nfds; ++i) {
             if (events[i].data.ptr == NULL) {
                 while (1) {
                     struct sockaddr_in client_addr;
@@ -112,25 +154,26 @@ int main(void) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) perror("accept");
                         break;
                     }
-
                     if (set_nonblocking(client_fd) == -1) {
-                        perror("fcntl (cliente)");
+                        perror("fcntl cliente");
                         close(client_fd);
                         continue;
                     }
 
                     Client *client = calloc(1, sizeof(*client));
                     if (client == NULL) {
-                        perror("calloc client");
+                        perror("calloc cliente");
                         close(client_fd);
                         continue;
                     }
                     client->fd = client_fd;
-                    struct epoll_event client_ev = {0};
-                    client_ev.events = EPOLLIN;
-                    client_ev.data.ptr = client;
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_ev) == -1) {
-                        perror("epoll_ctl (cliente)");
+                    client->file.fd = -1;
+
+                    struct epoll_event event = {0};
+                    event.events = EPOLLIN | EPOLLRDHUP;
+                    event.data.ptr = client;
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
+                        perror("epoll_ctl cliente");
                         close(client_fd);
                         free(client);
                         continue;
@@ -138,73 +181,53 @@ int main(void) {
                     printf("Cliente %d conectado\n", client_fd);
                     fflush(stdout);
                 }
-            } else {
-                Client *client = events[i].data.ptr;
-                int must_close = 0;
+                continue;
+            }
 
-                if (events[i].events & (EPOLLERR | EPOLLHUP)) {
-                    must_close = 1;
-                } else if (events[i].events & EPOLLIN) {
-                    size_t available = sizeof(client->buffer) - client->bytes_received - 1;
-                    if (available == 0) {
-                        fprintf(stderr, "Solicitud demasiado grande: cliente %d\n", client->fd);
-                        must_close = 1;
-                    } else {
-                        ssize_t n = receive_client_data(client->fd,
-                            client->buffer + client->bytes_received, available);
-                        if (n > 0) {
-                            client->bytes_received += (size_t)n;
-                            client->buffer[client->bytes_received] = '\0';
-
-                            if (strstr(client->buffer, "\r\n\r\n") != NULL) {
-                                HttpRequest req;
-                                int status = parse_http_request(client->buffer, &req);
-                                printf("Estado HTTP: %d\n", status);
-                                if (status == 200) {
-                                    printf("Metodo: %s\nURI: %s\nVersion: %s\n",
-                                        req.method, req.uri, req.version);
-                                }
-                                if (prepare_response(client, status) == -1) {
-                                    must_close = 1;
-                                } else {
-                                    struct epoll_event write_ev = {0};
-                                    write_ev.events = EPOLLOUT;
-                                    write_ev.data.ptr = client;
-                                    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD,
-                                                  client->fd, &write_ev) == -1) {
-                                        perror("epoll_ctl (escritura)");
-                                        must_close = 1;
-                                    }
-                                }
-                            } else if (client->bytes_received == sizeof(client->buffer) - 1) {
-                                fprintf(stderr, "Solicitud demasiado grande: cliente %d\n", client->fd);
+            Client *client = events[i].data.ptr;
+            int must_close = 0;
+            if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+                must_close = 1;
+            } else if (events[i].events & EPOLLIN) {
+                size_t space = sizeof(client->request) - client->received - 1;
+                if (space == 0) {
+                    if (prepare_response(client, 431, NULL) == -1 ||
+                        enable_write(epoll_fd, client) == -1) must_close = 1;
+                } else {
+                    ssize_t n = receive_client_data(client->fd,
+                        client->request + client->received, space);
+                    if (n > 0) {
+                        client->received += (size_t)n;
+                        client->request[client->received] = '\0';
+                        if (strstr(client->request, "\r\n\r\n") != NULL) {
+                            HttpRequest req;
+                            int status = parse_http_request(client->request, &req);
+                            if (status == 200) {
+                                printf("Metodo: %s\nURI: %s\nVersion: %s\n",
+                                       req.method, req.uri, req.version);
+                            }
+                            if (prepare_response(client, status,
+                                                 status == 200 ? req.uri : NULL) == -1 ||
+                                enable_write(epoll_fd, client) == -1) {
                                 must_close = 1;
                             }
-                        } else if (n == 0) {
-                            must_close = 1;
-                        } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-                            perror("recv");
-                            must_close = 1;
-                        }
-                    }
-                } else if (events[i].events & EPOLLOUT) {
-                    size_t pending = client->response_length - client->response_sent;
-                    ssize_t n = send_data(client->fd,
-                        client->response + client->response_sent, pending);
-                    if (n > 0) {
-                        client->response_sent += (size_t)n;
-                        if (client->response_sent == client->response_length) {
-                            must_close = 1;
+                        } else if (client->received == sizeof(client->request) - 1) {
+                            if (prepare_response(client, 431, NULL) == -1 ||
+                                enable_write(epoll_fd, client) == -1) must_close = 1;
                         }
                     } else if (n == 0) {
                         must_close = 1;
-                    } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
-                        perror("send");
+                    } else if (errno != EINTR && errno != EAGAIN &&
+                               errno != EWOULDBLOCK) {
+                        perror("recv");
                         must_close = 1;
                     }
                 }
-                if (must_close) close_client(epoll_fd, client);
+            } else if (events[i].events & EPOLLOUT) {
+                int result = write_client(client);
+                if (result == 1 || result == -1) must_close = 1;
             }
+            if (must_close) close_client(epoll_fd, client);
         }
     }
 
