@@ -12,9 +12,4 @@ typedef struct {
 
 int open_public_file(const char *uri, FileResource *resource);
 
-int build_file_header(const FileResource *resource, char *buffer,
-                      size_t capacity, size_t *length);
-int build_error_response(int status_code, char *buffer,
-                         size_t capacity, size_t *length);
-
 #endif

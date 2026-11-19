@@ -9,6 +9,11 @@
 #define MAX_EVENTS 64
 #define BUFFER_SIZE 4096
 #define MAX_URI_LEN 1024
+#define MAX_CLIENTS 100
+
+#define MAX_REQUEST_LINE 1100   
+#define MAX_HEADER_LINE  1024   
+#define MAX_HEADERS      50    
 
 int set_nonblocking(int sock);
 int start_server(void);

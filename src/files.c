@@ -6,7 +6,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,34 +15,65 @@
 
 #define WEB_ROOT "./www"
 
-static const char *status_text(int status) {
-    switch (status) {
-        case 400: return "Bad Request";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 414: return "URI Too Long";
-        case 431: return "Request Header Fields Too Large";
-        default: return "Internal Server Error";
+static int hex_value(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int percent_decode(const char *src, size_t len, char *dst, size_t capacity) {
+    size_t j = 0;
+    for (size_t i = 0; i < len; ++i) {
+        char c = src[i];
+        if (c == '%') {
+            if (i + 2 >= len) return -1;         
+            int hi = hex_value(src[i + 1]);
+            int lo = hex_value(src[i + 2]);
+            if (hi < 0 || lo < 0) return -1;
+            c = (char)(hi * 16 + lo);
+            if (c == '\0') return -1;
+            i += 2;
+        }
+        if (j + 1 >= capacity) return -1;
+        dst[j++] = c;
     }
+    dst[j] = '\0';
+    return 0;
+}
+
+static int has_dot_dot_segment(const char *path) {
+    const char *p = path;
+    while ((p = strstr(p, "..")) != NULL) {
+        int starts_segment = (p == path) || p[-1] == '/';
+        int ends_segment = p[2] == '\0' || p[2] == '/';
+        if (starts_segment && ends_segment) return 1;
+        p += 2;
+    }
+    return 0;
 }
 
 int open_public_file(const char *uri, FileResource *resource) {
-    if (resource == NULL || uri == NULL || uri[0] != '/') return 400;
+    if (resource == NULL) return 500;
     resource->fd = -1;
     resource->size = 0;
     resource->mime_type = NULL;
+    if (uri == NULL || uri[0] != '/') return 400;
 
     size_t uri_len = strcspn(uri, "?#");
-    char adjusted_uri[MAX_URI_LEN];
-    int n;
-    if (uri_len == 1) {
-        n = snprintf(adjusted_uri, sizeof(adjusted_uri), "%s/index.html", WEB_ROOT);
-    } else {
-        n = snprintf(adjusted_uri, sizeof(adjusted_uri), "%s%.*s",
-                     WEB_ROOT, (int)uri_len, uri);
-    }
-    if (n < 0 || (size_t)n >= sizeof(adjusted_uri)) return 414;
+
+    char decoded[MAX_URI_LEN];
+    if (percent_decode(uri, uri_len, decoded, sizeof(decoded)) == -1) return 400;
+
+    if (has_dot_dot_segment(decoded)) return 403;
+
+    size_t decoded_len = strlen(decoded);
+    const char *index = decoded[decoded_len - 1] == '/' ? "index.html" : "";
+
+    char adjusted_uri[PATH_MAX];
+    int n = snprintf(adjusted_uri, sizeof(adjusted_uri), "%s%s%s",
+                     WEB_ROOT, decoded, index);
+    if (n < 0 || (size_t)n >= sizeof(adjusted_uri)) return 400;
 
     char real_web_root[PATH_MAX];
     if (realpath(WEB_ROOT, real_web_root) == NULL) return 500;
@@ -51,6 +81,7 @@ int open_public_file(const char *uri, FileResource *resource) {
     char real_path[PATH_MAX];
     if (realpath(adjusted_uri, real_path) == NULL) {
         if (errno == EACCES) return 403;
+        if (errno == ENAMETOOLONG) return 400; 
         if (errno == ENOENT || errno == ENOTDIR) return 404;
         return 500;
     }
@@ -82,44 +113,4 @@ int open_public_file(const char *uri, FileResource *resource) {
     resource->size = st.st_size;
     resource->mime_type = get_mime_type(real_path);
     return 200;
-}
-
-int build_file_header(const FileResource *resource, char *buffer,
-                      size_t capacity, size_t *length) {
-    if (resource == NULL || buffer == NULL || length == NULL) return -1;
-    int n = snprintf(buffer, capacity,
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: %s\r\n"
-                     "Content-Length: %jd\r\n"
-                     "Connection: close\r\n"
-                     "\r\n",
-                     resource->mime_type, (intmax_t)resource->size);
-    if (n < 0 || (size_t)n >= capacity) return -1;
-    *length = (size_t)n;
-    return 0;
-}
-
-int build_error_response(int status_code, char *buffer,
-                         size_t capacity, size_t *length) {
-    if (buffer == NULL || length == NULL) return -1;
-    const char *reason = status_text(status_code);
-    const char *extra = status_code == 405 ? "Allow: GET\r\n" : "";
-    char body[256];
-    int body_len = snprintf(body, sizeof(body),
-                            "<html><body><h1>%d %s</h1></body></html>",
-                            status_code, reason);
-    if (body_len < 0 || (size_t)body_len >= sizeof(body)) return -1;
-
-    int n = snprintf(buffer, capacity,
-                     "HTTP/1.1 %d %s\r\n"
-                     "Content-Type: text/html; charset=UTF-8\r\n"
-                     "Content-Length: %d\r\n"
-                     "%s"
-                     "Connection: close\r\n"
-                     "\r\n"
-                     "%s",
-                     status_code, reason, body_len, extra, body);
-    if (n < 0 || (size_t)n >= capacity) return -1;
-    *length = (size_t)n;
-    return 0;
 }

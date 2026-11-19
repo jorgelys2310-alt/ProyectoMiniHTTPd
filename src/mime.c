@@ -12,12 +12,19 @@ static const struct mime_map mime_table[] = {
     {".css", "text/css"},
     {".js", "application/javascript"},
     {".png", "image/png"},
+    {".jpg", "image/jpeg"},
+    {".jpeg", "image/jpeg"},
     {NULL, NULL}
 };
 
 const char *get_mime_type(const char *path) {
     if (path == NULL) return "application/octet-stream";
-    const char *dot = strrchr(path, '.');
+
+    /* Solo se mira el nombre del archivo, no las carpetas (ej: "v1.2/README") */
+    const char *slash = strrchr(path, '/');
+    const char *filename = slash != NULL ? slash + 1 : path;
+
+    const char *dot = strrchr(filename, '.');
     if (dot == NULL) return "application/octet-stream";
 
     for (size_t i = 0; mime_table[i].extension != NULL; ++i) {
@@ -27,4 +34,3 @@ const char *get_mime_type(const char *path) {
     }
     return "application/octet-stream";
 }
-
