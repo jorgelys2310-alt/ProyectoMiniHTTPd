@@ -1,3 +1,8 @@
+/**
+ * @file server.c
+ * @brief Creación del socket del servidor y funciones de envío/recepción.
+ */
+
 #include "server.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -7,12 +12,18 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+/* Activa O_NONBLOCK conservando los demás flags del descriptor. */
 int set_nonblocking(int sock) {
     int opts = fcntl(sock, F_GETFL, 0);
     if (opts == -1) return -1;
     return fcntl(sock, F_SETFL, opts | O_NONBLOCK);
 }
 
+/*
+ * Crea el socket TCP de escucha:
+ *   socket() -> SO_REUSEADDR (reiniciar sin esperar TIME_WAIT)
+ *   -> bind(127.0.0.1:PORT) -> listen() -> modo no bloqueante.
+ */
 int start_server(void) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
@@ -20,6 +31,7 @@ int start_server(void) {
         return -1;
     }
 
+    /* Permite reutilizar el puerto inmediatamente tras reiniciar el servidor */
     int opt = 1;
     if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
         perror("setsockopt");
@@ -51,10 +63,12 @@ error:
     return -1;
 }
 
+/* Lee lo que haya disponible en el socket (no bloquea: socket O_NONBLOCK). */
 ssize_t receive_client_data(int client_fd, char *buffer, size_t capacity) {
     return recv(client_fd, buffer, capacity, 0);
 }
 
+/* Envía solo lo que el socket pueda aceptar ahora. EPOLLOUT gestiona el resto. */
 ssize_t send_data(int fd, const char *buf, size_t len) {
     return send(fd, buf, len, MSG_NOSIGNAL);
 }
