@@ -75,13 +75,6 @@ por lo que debe iniciarse desde la raíz del proyecto:
 ```bash
 make run        # o bien: ./minihttpd
 ```
-
-Salida esperada:
-
-```
-MiniHTTPd escuchando en 127.0.0.1:8080
-```
-
 Luego abrir en el navegador: <http://127.0.0.1:8080/>
 
 Para detener el servidor: `Ctrl + C`.
