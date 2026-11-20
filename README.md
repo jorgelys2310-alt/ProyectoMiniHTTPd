@@ -180,3 +180,9 @@ curl -i --path-as-is http://127.0.0.1:8080/../../etc/passwd  # 403
 curl -i http://127.0.0.1:8080/no-existe.html                 # 404
 curl -i -X POST http://127.0.0.1:8080/                       # 405
 ```
+
+---
+
+## Autor
+
+Jorge Yanez - Proyecto Integrador MiniHTTPd
